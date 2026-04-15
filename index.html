@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Snake Game</title>
+<title>Snake - Multiplayer</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -17,9 +17,7 @@
     color: #eee;
   }
 
-  .container {
-    text-align: center;
-  }
+  .container { text-align: center; }
 
   h1 {
     font-size: 2rem;
@@ -30,11 +28,15 @@
 
   .score-bar {
     display: flex;
-    justify-content: space-between;
+    justify-content: center;
+    gap: 2rem;
     max-width: 400px;
     margin: 0 auto 0.5rem;
     font-size: 1.1rem;
   }
+
+  .score-bar .p0 { color: #00ff88; }
+  .score-bar .p1 { color: #3399ff; }
 
   canvas {
     border: 2px solid #0f0;
@@ -44,21 +46,26 @@
     background: #0d0d1a;
   }
 
+  .canvas-wrap {
+    position: relative;
+    display: inline-block;
+  }
+
   .overlay {
     position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
     display: flex;
     flex-direction: column;
     justify-content: center;
     align-items: center;
-    gap: 1rem;
-    pointer-events: none;
+    gap: 0.75rem;
+    background: rgba(13, 13, 26, 0.85);
+    pointer-events: auto;
   }
 
   .overlay.hidden { display: none; }
 
-  .overlay p {
-    font-size: 1.5rem;
-  }
+  .overlay p { font-size: 1.2rem; }
 
   .overlay .big {
     font-size: 2.5rem;
@@ -66,10 +73,53 @@
     color: #0f0;
   }
 
-  .instructions {
-    margin-top: 0.75rem;
+  .overlay .countdown {
+    font-size: 4rem;
+    font-weight: bold;
+    color: #ff2255;
+    text-shadow: 0 0 20px rgba(255, 34, 85, 0.5);
+  }
+
+  .overlay input {
+    background: #222;
+    border: 1px solid #555;
+    color: #eee;
+    padding: 0.4rem 0.8rem;
+    font-size: 1rem;
+    border-radius: 4px;
+    text-align: center;
+    width: 180px;
+    outline: none;
+  }
+
+  .overlay input:focus { border-color: #0f0; }
+
+  .overlay button {
+    background: #0f0;
+    color: #1a1a2e;
+    border: none;
+    padding: 0.5rem 1.5rem;
+    font-size: 1rem;
+    font-weight: bold;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .overlay button:hover { background: #0c0; }
+
+  .status-bar {
+    margin-top: 0.5rem;
     font-size: 0.85rem;
     color: #888;
+  }
+
+  .status-bar .connected { color: #0f0; }
+  .status-bar .disconnected { color: #f44; }
+
+  .instructions {
+    margin-top: 0.25rem;
+    font-size: 0.85rem;
+    color: #666;
   }
 </style>
 </head>
@@ -77,109 +127,210 @@
 <div class="container">
   <h1>Snake</h1>
   <div class="score-bar">
-    <span>Score: <strong id="score">0</strong></span>
-    <span>Best: <strong id="highScore">0</strong></span>
+    <span class="p0" id="score0"></span>
+    <span class="p1" id="score1"></span>
   </div>
-  <div style="position:relative;display:inline-block;">
+  <div class="canvas-wrap">
     <canvas id="game" width="400" height="400"></canvas>
     <div class="overlay" id="overlay">
-      <p class="big" id="overlayTitle">Snake</p>
-      <p id="overlayMsg">Press any key or tap to start</p>
+      <p class="big" id="overlayTitle">Multiplayer Snake</p>
+      <p id="overlayMsg">Enter your name to join</p>
+      <input id="nameInput" type="text" placeholder="Your name" maxlength="16" />
+      <button id="joinBtn">Join Game</button>
     </div>
   </div>
-  <p class="instructions">Arrow keys / WASD to move &middot; P to pause</p>
+  <p class="status-bar">
+    <span id="connStatus" class="disconnected">Connecting...</span>
+  </p>
+  <p class="instructions">Arrow keys or WASD to move</p>
 </div>
 
 <script>
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-const scoreEl = document.getElementById('score');
-const highScoreEl = document.getElementById('highScore');
+const score0El = document.getElementById('score0');
+const score1El = document.getElementById('score1');
 const overlay = document.getElementById('overlay');
 const overlayTitle = document.getElementById('overlayTitle');
 const overlayMsg = document.getElementById('overlayMsg');
+const nameInput = document.getElementById('nameInput');
+const joinBtn = document.getElementById('joinBtn');
+const connStatus = document.getElementById('connStatus');
 
 const GRID = 20;
 const COLS = canvas.width / GRID;
 const ROWS = canvas.height / GRID;
-const TICK_MS = 110;
 
-let snake, direction, nextDirection, food, score, highScore, gameState, loopId;
+const PLAYER_COLORS = [
+  { head: '#00ff88', glow: '#00ff88', body: (i, len) => { const r = 1 - i / len; return `rgb(0, ${Math.floor(180 + 75 * r)}, ${Math.floor(80 + 50 * r)})`; } },
+  { head: '#3399ff', glow: '#3399ff', body: (i, len) => { const r = 1 - i / len; return `rgb(${Math.floor(30 + 20 * r)}, ${Math.floor(120 + 50 * r)}, ${Math.floor(200 + 55 * r)})`; } },
+];
 
-// gameState: 'idle' | 'running' | 'paused' | 'dead'
+let ws = null;
+let myId = null;
+let state = null;      // latest server state
+let joined = false;
+let currentScreen = 'join'; // 'join' | 'lobby' | 'countdown' | 'game' | 'gameover'
 
-highScore = parseInt(localStorage.getItem('snakeHighScore') || '0', 10);
-highScoreEl.textContent = highScore;
+// --- WebSocket connection ---
 
-function init() {
-  const midX = Math.floor(COLS / 2);
-  const midY = Math.floor(ROWS / 2);
-  snake = [
-    { x: midX, y: midY },
-    { x: midX - 1, y: midY },
-    { x: midX - 2, y: midY },
-  ];
-  direction = { x: 1, y: 0 };
-  nextDirection = { x: 1, y: 0 };
-  score = 0;
-  scoreEl.textContent = score;
-  placeFood();
-}
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}`);
 
-function placeFood() {
-  let pos;
-  do {
-    pos = {
-      x: Math.floor(Math.random() * COLS),
-      y: Math.floor(Math.random() * ROWS),
-    };
-  } while (snake.some(s => s.x === pos.x && s.y === pos.y));
-  food = pos;
-}
-
-function update() {
-  direction = { ...nextDirection };
-  const head = {
-    x: snake[0].x + direction.x,
-    y: snake[0].y + direction.y,
-  };
-
-  // Wall collision
-  if (head.x < 0 || head.x >= COLS || head.y < 0 || head.y >= ROWS) {
-    return die();
-  }
-
-  // Self collision
-  if (snake.some(s => s.x === head.x && s.y === head.y)) {
-    return die();
-  }
-
-  snake.unshift(head);
-
-  if (head.x === food.x && head.y === food.y) {
-    score++;
-    scoreEl.textContent = score;
-    if (score > highScore) {
-      highScore = score;
-      highScoreEl.textContent = highScore;
-      localStorage.setItem('snakeHighScore', String(highScore));
+  ws.addEventListener('open', () => {
+    connStatus.textContent = 'Connected';
+    connStatus.className = 'connected';
+    if (joined) {
+      // Reconnecting — re-show join
+      showJoinScreen();
     }
-    placeFood();
-  } else {
-    snake.pop();
+  });
+
+  ws.addEventListener('close', () => {
+    connStatus.textContent = 'Disconnected — reconnecting...';
+    connStatus.className = 'disconnected';
+    myId = null;
+    joined = false;
+    setTimeout(connect, 2000);
+  });
+
+  ws.addEventListener('message', (e) => {
+    const msg = JSON.parse(e.data);
+    handleMessage(msg);
+  });
+}
+
+function send(msg) {
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify(msg));
   }
 }
 
-function die() {
-  gameState = 'dead';
-  clearInterval(loopId);
-  showOverlay('Game Over', `Score: ${score} — Press any key to restart`);
+// --- Message handling ---
+
+function handleMessage(msg) {
+  switch (msg.type) {
+    case 'welcome':
+      myId = msg.id;
+      break;
+
+    case 'lobby':
+      showLobbyScreen(msg);
+      break;
+
+    case 'countdown':
+      showCountdown(msg.seconds);
+      break;
+
+    case 'state':
+      state = msg;
+      if (currentScreen !== 'game') {
+        currentScreen = 'game';
+        hideOverlay();
+      }
+      updateScoreBar();
+      draw();
+      break;
+
+    case 'gameover':
+      showGameOver(msg);
+      break;
+
+    case 'playerLeft':
+      showOverlayScreen('Player Left', `${msg.name} disconnected. Waiting for players...`);
+      currentScreen = 'lobby';
+      break;
+
+    case 'full':
+      showOverlayScreen('Game Full', msg.message);
+      break;
+  }
 }
+
+// --- UI screens ---
+
+function showJoinScreen() {
+  currentScreen = 'join';
+  overlayTitle.textContent = 'Multiplayer Snake';
+  overlayMsg.textContent = 'Enter your name to join';
+  nameInput.style.display = '';
+  joinBtn.style.display = '';
+  joinBtn.textContent = 'Join Game';
+  joinBtn.onclick = doJoin;
+  overlay.classList.remove('hidden');
+}
+
+function doJoin() {
+  const name = nameInput.value.trim() || `Player ${(myId || 0) + 1}`;
+  send({ type: 'setName', name });
+  joined = true;
+  nameInput.style.display = 'none';
+  joinBtn.style.display = 'none';
+}
+
+function showLobbyScreen(msg) {
+  currentScreen = 'lobby';
+  const names = msg.players.map(p => p.name).join(', ');
+  overlayTitle.textContent = 'Waiting for Players';
+  overlayMsg.textContent = `${msg.players.length}/${msg.needed} — ${names}`;
+  nameInput.style.display = 'none';
+  joinBtn.style.display = 'none';
+  overlay.classList.remove('hidden');
+}
+
+function showCountdown(seconds) {
+  currentScreen = 'countdown';
+  overlayTitle.textContent = '';
+  overlayMsg.innerHTML = `<span class="countdown">${seconds}</span>`;
+  nameInput.style.display = 'none';
+  joinBtn.style.display = 'none';
+  overlay.classList.remove('hidden');
+}
+
+function showGameOver(msg) {
+  currentScreen = 'gameover';
+  const scores = msg.players.map(p => `${p.name}: ${p.score}`).join('  |  ');
+  if (msg.winner) {
+    overlayTitle.textContent = `${msg.winner} Wins!`;
+  } else {
+    overlayTitle.textContent = 'Draw!';
+  }
+  overlayMsg.textContent = scores;
+  nameInput.style.display = 'none';
+  joinBtn.style.display = '';
+  joinBtn.textContent = 'Play Again';
+  joinBtn.onclick = () => send({ type: 'restart' });
+  overlay.classList.remove('hidden');
+}
+
+function showOverlayScreen(title, msg) {
+  overlayTitle.textContent = title;
+  overlayMsg.textContent = msg;
+  nameInput.style.display = 'none';
+  joinBtn.style.display = 'none';
+  overlay.classList.remove('hidden');
+}
+
+function hideOverlay() {
+  overlay.classList.add('hidden');
+}
+
+function updateScoreBar() {
+  if (!state) return;
+  const p = state.players;
+  score0El.textContent = p[0] ? `${p[0].name}: ${p[0].score}` : '';
+  score1El.textContent = p[1] ? `${p[1].name}: ${p[1].score}` : '';
+}
+
+// --- Drawing ---
 
 function draw() {
+  if (!state) return;
+
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Draw grid lines (subtle)
+  // Grid
   ctx.strokeStyle = 'rgba(255,255,255,0.03)';
   ctx.lineWidth = 0.5;
   for (let x = 0; x <= COLS; x++) {
@@ -195,137 +346,88 @@ function draw() {
     ctx.stroke();
   }
 
-  // Draw food
-  ctx.fillStyle = '#ff2255';
-  ctx.shadowColor = '#ff2255';
-  ctx.shadowBlur = 8;
-  ctx.beginPath();
-  ctx.arc(
-    food.x * GRID + GRID / 2,
-    food.y * GRID + GRID / 2,
-    GRID / 2 - 2,
-    0,
-    Math.PI * 2
-  );
-  ctx.fill();
-  ctx.shadowBlur = 0;
-
-  // Draw snake
-  snake.forEach((seg, i) => {
-    const ratio = 1 - i / snake.length;
-    const g = Math.floor(180 + 75 * ratio);
-    ctx.fillStyle = `rgb(0, ${g}, 0)`;
-    ctx.shadowColor = '#0f0';
-    ctx.shadowBlur = i === 0 ? 6 : 2;
-    const pad = i === 0 ? 1 : 2;
-    ctx.fillRect(
-      seg.x * GRID + pad,
-      seg.y * GRID + pad,
-      GRID - pad * 2,
-      GRID - pad * 2
+  // Food
+  if (state.food) {
+    ctx.fillStyle = '#ff2255';
+    ctx.shadowColor = '#ff2255';
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.arc(
+      state.food.x * GRID + GRID / 2,
+      state.food.y * GRID + GRID / 2,
+      GRID / 2 - 2, 0, Math.PI * 2
     );
-  });
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // Snakes
+  for (const p of state.players) {
+    const colors = PLAYER_COLORS[p.id % PLAYER_COLORS.length];
+    const alpha = p.alive ? 1 : 0.3;
+    ctx.globalAlpha = alpha;
+
+    p.snake.forEach((seg, i) => {
+      ctx.fillStyle = i === 0 ? colors.head : colors.body(i, p.snake.length);
+      ctx.shadowColor = colors.glow;
+      ctx.shadowBlur = i === 0 ? 6 : 2;
+      const pad = i === 0 ? 1 : 2;
+      ctx.fillRect(
+        seg.x * GRID + pad,
+        seg.y * GRID + pad,
+        GRID - pad * 2,
+        GRID - pad * 2
+      );
+    });
+
+    ctx.globalAlpha = 1;
+  }
   ctx.shadowBlur = 0;
 }
 
-function tick() {
-  update();
-  if (gameState === 'running') draw();
-}
+// --- Input ---
 
-function startGame() {
-  init();
-  hideOverlay();
-  gameState = 'running';
-  draw();
-  loopId = setInterval(tick, TICK_MS);
-}
-
-function showOverlay(title, msg) {
-  overlayTitle.textContent = title;
-  overlayMsg.textContent = msg;
-  overlay.classList.remove('hidden');
-}
-
-function hideOverlay() {
-  overlay.classList.add('hidden');
-}
-
-function handleDirection(nx, ny) {
-  // Prevent 180° reversal
-  if (direction.x === -nx && direction.y === -ny) return;
-  nextDirection = { x: nx, y: ny };
-}
-
-// Keyboard controls
-document.addEventListener('keydown', e => {
-  if (gameState === 'idle' || gameState === 'dead') {
-    startGame();
-    return;
-  }
-
-  if (e.key === 'p' || e.key === 'P') {
-    if (gameState === 'running') {
-      gameState = 'paused';
-      clearInterval(loopId);
-      showOverlay('Paused', 'Press P to resume');
-    } else if (gameState === 'paused') {
-      gameState = 'running';
-      hideOverlay();
-      loopId = setInterval(tick, TICK_MS);
-    }
-    return;
-  }
-
-  if (gameState === 'paused') {
-    if (e.key === 'p' || e.key === 'P') {
-      gameState = 'running';
-      hideOverlay();
-      loopId = setInterval(tick, TICK_MS);
-    }
-    return;
-  }
-
+document.addEventListener('keydown', (e) => {
+  let dir = null;
   switch (e.key) {
-    case 'ArrowUp':    case 'w': case 'W': handleDirection(0, -1); break;
-    case 'ArrowDown':  case 's': case 'S': handleDirection(0, 1);  break;
-    case 'ArrowLeft':  case 'a': case 'A': handleDirection(-1, 0); break;
-    case 'ArrowRight': case 'd': case 'D': handleDirection(1, 0);  break;
+    case 'ArrowUp':    case 'w': case 'W': dir = { x: 0, y: -1 }; break;
+    case 'ArrowDown':  case 's': case 'S': dir = { x: 0, y: 1 };  break;
+    case 'ArrowLeft':  case 'a': case 'A': dir = { x: -1, y: 0 }; break;
+    case 'ArrowRight': case 'd': case 'D': dir = { x: 1, y: 0 };  break;
+  }
+  if (dir) {
+    e.preventDefault();
+    send({ type: 'direction', dir });
   }
 });
 
 // Touch controls
 let touchStartX = 0, touchStartY = 0;
-canvas.addEventListener('touchstart', e => {
-  if (gameState === 'idle' || gameState === 'dead') {
-    startGame();
-    return;
-  }
+canvas.addEventListener('touchstart', (e) => {
   touchStartX = e.touches[0].clientX;
   touchStartY = e.touches[0].clientY;
 });
 
-canvas.addEventListener('touchmove', e => {
-  e.preventDefault();
-}, { passive: false });
+canvas.addEventListener('touchmove', (e) => { e.preventDefault(); }, { passive: false });
 
-canvas.addEventListener('touchend', e => {
-  if (gameState !== 'running') return;
+canvas.addEventListener('touchend', (e) => {
   const dx = e.changedTouches[0].clientX - touchStartX;
   const dy = e.changedTouches[0].clientY - touchStartY;
   if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
   if (Math.abs(dx) > Math.abs(dy)) {
-    handleDirection(dx > 0 ? 1 : -1, 0);
+    send({ type: 'direction', dir: { x: dx > 0 ? 1 : -1, y: 0 } });
   } else {
-    handleDirection(0, dy > 0 ? 1 : -1);
+    send({ type: 'direction', dir: { x: 0, y: dy > 0 ? 1 : -1 } });
   }
 });
 
-// Initial state
-gameState = 'idle';
-init();
-draw();
-showOverlay('Snake', 'Press any key or tap to start');
+// Enter key joins or restarts
+nameInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') joinBtn.click();
+});
+
+// --- Init ---
+connect();
 </script>
 </body>
 </html>
